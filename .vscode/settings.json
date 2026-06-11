@@ -1,0 +1,73 @@
+{
+  // ==========================================
+  // General Editor Quality of Life
+  // ==========================================
+  "files.trimTrailingWhitespace": true,
+  "files.insertFinalNewline": true,
+  "files.trimFinalNewlines": true,
+  "editor.formatOnSave": true,
+  "editor.rulers": [80, 120],
+  "editor.bracketPairColorization.enabled": true,
+
+  // ==========================================
+  // Golang Configuration
+  // ==========================================
+  // Enable the official Go language server (gopls)
+  "go.useLanguageServer": true,
+  
+  // Use goimports to automatically add/remove imports on save
+  "go.formatTool": "goimports",
+  
+  // Use golangci-lint for aggressive, highly configurable linting 
+  // (requires running: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest)
+  "go.lintTool": "golangci-lint",
+  "go.lintOnSave": "package",
+  
+  // Enable advanced gopls features
+  "gopls": {
+    "ui.semanticTokens": true,
+    "formatting.gofumpt": true, // Stricter formatting than gofmt
+    "analyses": {
+      "unusedparams": true,
+      "shadow": true
+    }
+  },
+
+  // Go-specific editor overrides
+  "[go]": {
+    // Go strictly uses tabs, not spaces
+    "editor.insertSpaces": false,
+    "editor.tabSize": 4,
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.organizeImports": "explicit"
+    }
+  },
+  "[go.mod]": {
+    "editor.formatOnSave": true
+  },
+
+  // ==========================================
+  // Terraform Configuration
+  // ==========================================
+  "terraform.languageServer.enable": true,
+  
+  // Optional: Run `terraform validate` automatically on save
+  "terraform.experimentalFeatures.validateOnSave": true,
+
+  // Terraform-specific editor overrides
+  "[terraform]": {
+    "editor.defaultFormatter": "hashicorp.terraform",
+    "editor.formatOnSave": true,
+    // Terraform standard is 2 spaces
+    "editor.tabSize": 2,
+    "editor.insertSpaces": true
+  },
+  
+  "[terraform-vars]": {
+    "editor.defaultFormatter": "hashicorp.terraform",
+    "editor.formatOnSave": true,
+    "editor.tabSize": 2,
+    "editor.insertSpaces": true
+  }
+}

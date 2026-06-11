@@ -1,0 +1,365 @@
+#!/bin/bash
+
+# set -e
+
+
+function do_all() {
+    echo "starting cleanup"
+    do_cleanup
+    # echo "starting build"
+    # do_build
+    echo "creating infra"
+    do_compose
+    echo "cool it down"
+    sleep 5
+    echo "setting up GraphQL"
+    do_setup_graphql
+    echo "setting up Vault"
+    do_setup_vault
+    exit 0
+}
+
+trap do_all SIGKILL SIGINT
+
+
+
+function do_build() {
+    echo "building plugin for openbao"
+    CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build  -gcflags "all=-N -l" -o sensitive/openbao/plugins//graphql cmd/openbao-plugin-secrets-graphql/main.go
+    echo "building plugin for vault"
+    CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build  -gcflags "all=-N -l" -o ./../../sensitive/vault/plugins/graphql .
+}
+
+
+function do_cleanup() {
+    docker-compose down
+    docker system prune -af
+    echo "Purge the TF State"
+    rm -rf ./opentofu/.tofu
+    rm -rf ./opentofu/.tofu.lock.hcl
+    rm -rf ./terraform/.terraform
+    rm -rf ./terraform/.terraform.lock.hcl
+    # exit 0
+}
+
+function do_compose() {
+    docker compose down
+    docker compose up -d
+}
+
+function do_refresh() {
+    do_setup_graphql
+    do_setup_vault
+}
+
+function do_login() {
+    export VAULT_TOKEN=$(cat ./sensitive/vault/vault.txt | grep '^Initial' | awk '{print $4}')
+
+
+    export VAULT_ADDR=https://127.0.0.1:8200
+    export VAULT_TOKEN=...            # your token
+    export MOUNT=gql                     # <-- change to your actual mount path
+
+    # 1) Is the path itself registered? help=true triggers HelpOperation on any matched path.
+    #    Returns help JSON if the route exists; 404 "unsupported path" means wrong mount/prefix/charset.
+    curl -sS -H "X-Vault-Token: $VAULT_TOKEN" \
+    "$VAULT_ADDR/v1/$MOUNT/role/admin?help=true" | jq
+
+    # 2) Confirm the mount exists and is this plugin (check the path + "type")
+    curl -sS -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/sys/mounts" | jq '."'"$MOUNT"'/"' | jq
+
+    # 3) Did the role actually persist? If it's not listed, your write didn't land.
+    curl -sS -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/$MOUNT/role?list=true" | jq
+
+    # --- read role (GET; the call that was 404ing). No trailing slash; name is lower-cased. ---
+    curl -sS -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/$MOUNT/role/admin"  | jq
+
+    # list roles (either form works)
+    curl -sS -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/$MOUNT/role?list=true" | jq
+    curl -sS -X LIST -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/$MOUNT/role" | jq
+
+    # --- issue a leased credential (GET; creds is Read+Update) ---
+    curl -sS -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/$MOUNT/creds/admin" | jq
+
+    # --- rotate the role's stored token (POST; rotate is UpdateOperation only, empty body is fine) ---
+    # curl -sS -X POST -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/$MOUNT/rotate/admin" | jq
+
+    # delete role (DELETE; 204)
+    # curl -sS -i -X DELETE -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/$MOUNT/role/admin" | jq
+}
+
+
+function do_repush() {
+    git checkout --orphan latest_branch
+    git add -A
+    git commit -am "hello world"
+    git branch -D main
+    git branch -m main
+    git push -f origin main
+
+}
+
+
+function do_setup_graphql() {
+
+    echo "creating initial users"
+    curl -X POST http://localhost:8080/graphql \
+        -H "Content-Type: application/json" \
+        -d '{"query":"mutation { createUser(username: \"admin\", password: \"changeme\") { id username } }"}'
+
+    curl -X POST http://localhost:8080/graphql \
+        -H "Content-Type: application/json" \
+        -d '{"query":"mutation { createUser(username: \"jane_doe\", password: \"secret123\") { id username } }"}'
+
+    echo "creating initial token"
+    export TOKEN_ADMIN=$(curl -X POST http://localhost:8080/graphql \
+        -H "Content-Type: application/json" \
+        -d '{"query":"mutation { login(username: \"admin\", password: \"changeme\") { token user { id } } }"}'  | jq -r .data.login.token)
+
+    export TOKEN_USER=$(curl -X POST http://localhost:8080/graphql \
+        -H "Content-Type: application/json" \
+        -d '{"query":"mutation { login(username: \"jane_doe\", password: \"secret123\") { token user { id } } }"}'  | jq -r .data.login.token)
+
+    echo "creating initial service account & getting token"
+    export TOKEN_SERVICE=$(curl -X POST http://localhost:8080/graphql \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $TOKEN_ADMIN" \
+        -d '{"query":"mutation { createServiceAccount(name: \"Background Job\") { serviceAccount { id name } secret } }"}' | jq -r .data.createServiceAccount.secret)
+
+    echo "create service account(s) as service account (this should fail as forbidden)"
+    curl -X POST http://localhost:8080/graphql \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $TOKEN_SERVICE" \
+        -d '{"query":"mutation { createServiceAccount(name: \"Background Job\") { serviceAccount { id name } secret } }"}' | jq
+}
+
+function do_setup_vault() {
+
+    export VAULT_ADDR="http://127.0.0.1:8200"
+
+    export counter=0
+    until curl -s -k "$VAULT_ADDR/v1/sys/health" | grep -q '"sealed":false'; do
+        echo "Vault is still sealed. Waiting..."
+        sleep 5
+        ((counter++))
+        seconds=$(($counter * 5))
+        echo "Elapsed time waiting for vault unseal: $seconds seconds"
+    done
+    echo "Vault is NOT sealed after $seconds seconds"
+
+
+    echo "Continuing..."
+    echo "getting bearer token"
+    export VAULT_TOKEN=$(cat ./sensitive/vault/vault.txt | grep '^Initial' | awk '{print $4}')
+
+    export MOUNT="gql"
+    echo "listing vault mounts & types"
+    curl --header "X-Vault-Token: $VAULT_TOKEN" \
+        --request GET \
+        http://127.0.0.1:8200/v1/sys/mnt | jq
+
+    curl -X DELETE \
+        -H "X-Vault-Request: true" \
+        -H "X-Vault-Token: $VAULT_TOKEN" \
+        $VAULT_ADDR/v1/sys/plugins/catalog/secret/graphql
+
+    echo "copying plugin for vault"
+    docker cp vault:/vault/plugins/graphql ./plugins/vault/graphql
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        export SHA256=$(shasum -a 256 "./plugins/vault/graphql" | cut -d ' ' -f1)
+    else
+        export SHA256=$(sha256sum "./plugins/vault/graphql" | cut -d ' ' -f1)
+    fi
+
+    echo "here is the checksum for your vault plugin"
+    echo "$SHA256"
+
+    echo "registering plugin"
+    curl --request POST \
+        --header "X-Vault-Token: ${VAULT_TOKEN}" \
+        --header "Content-Type: application/json" \
+        --data @- \
+        ${VAULT_ADDR}/v1/sys/plugins/catalog/secret/graphql <<EOF
+{
+"sha_256": "${SHA256}",
+"command": "graphql",
+"args": [],
+"version": "v1.0.0"
+}
+EOF
+
+
+    echo "catalog of plugins"
+    curl \
+        --header "X-Vault-Token: $VAULT_TOKEN" \
+           http://127.0.0.1:8200/v1/sys/plugins/catalog/secret/graphql?version=v1.0.0 | jq
+
+
+    echo "read all plugins"
+    curl \
+        --header "X-Vault-Token: $VAULT_TOKEN" \
+        --request GET \
+        http://127.0.0.1:8200/v1/sys/plugins/catalog | jq
+
+
+    # echo "configuring plugin config path"
+
+    # PAYLOAD=$(jq -n \
+    # --arg sha "$SHA256" \
+    # '{"sha256": $sha, "command": "graphql", "type": "graphql"}')
+
+    # curl -v \
+    #     --request POST \
+    #     --header "X-Vault-Token: $VAULT_TOKEN" \
+    #     --data "$PAYLOAD" \
+    #     http://127.0.0.1:8200/v1/sys/plugins/catalog/secret/graphql
+
+
+    echo "read about plugin"
+    curl \
+        --header "X-Vault-Token: $VAULT_TOKEN" \
+        --request GET \
+           http://127.0.0.1:8200/v1/sys/plugins/catalog/secret/graphql?version=v1.0.0 | jq
+
+
+    echo "create the mount"
+    curl \
+        --request POST \
+        --header "X-Vault-Token: $VAULT_TOKEN" \
+        --data '{"type": "graphql"}' \
+        $VAULT_ADDR/v1/sys/mounts/gql | jq
+
+    echo "path config before"
+
+
+    curl \
+        --header "X-Vault-Token: $VAULT_TOKEN" \
+        --request GET \
+        $VAULT_ADDR/v1/sys/mounts/$MOUNT/config | jq
+
+    echo "setting path config"
+
+    curl \
+        --header "X-Vault-Token: $VAULT_TOKEN" \
+        --request POST \
+        --data '{"url": "http://graphql:8080/graphql", "username": "admin", "password": "changeme"}' \
+        http://127.0.0.1:8200/v1/$MOUNT/config | jq
+
+    echo "path config after"
+
+    curl \
+        --header "X-Vault-Token: $VAULT_TOKEN" \
+        --request GET \
+        http://127.0.0.1:8200/v1/$MOUNT/config | jq
+
+    echo "create test role"
+
+    curl -sS \
+        --header "X-Vault-Token: $VAULT_TOKEN" \
+        --request POST \
+        --data '{
+    "name": "test",
+    "username": "test",
+    "ttl": "1h",
+    "max_ttl": "24h"
+  }' \
+  "$VAULT_ADDR/v1/$MOUNT/role/create"
+
+    echo "get mount config"
+    curl \
+        --header "X-Vault-Token: $VAULT_TOKEN" \
+        --request GET \
+        http://127.0.0.1:8200/v1/$MOUNT/config | jq
+
+    echo "get role under admin with alternative username"
+    curl \
+        --header "X-Vault-Token: $VAULT_TOKEN" \
+        --request POST \
+        --data '{ "username": "foo"}' \
+        http://127.0.0.1:8200/v1/$MOUNT/role/admin | jq
+
+    echo "get creds admin"
+    curl \
+        --header "X-Vault-Token: $VAULT_TOKEN" \
+        --request GET \
+        http://127.0.0.1:8200/v1/$MOUNT/creds/admin | jq
+
+
+    echo "get role under admin with alternative username"
+    curl \
+        --header "X-Vault-Token: $VAULT_TOKEN" \
+        --request POST \
+        --data '{ "username": "bar"}' \
+        http://127.0.0.1:8200/v1/$MOUNT/role/admin | jq
+
+    echo "get creds admin"
+    curl \
+        --header "X-Vault-Token: $VAULT_TOKEN" \
+        --request GET \
+        http://127.0.0.1:8200/v1/$MOUNT/creds/admin | jq
+
+}
+
+function do_terraform() {
+  pushd terraform
+  terraform init
+  terraform apply -auto-approve
+  popd
+}
+
+function do_opentofu() {
+  pushd opentofu
+  tofu init
+  tofu apply -auto-approve
+  popd
+}
+
+
+
+function setup_linux() {
+  pushd opentofu
+  tofu init
+  tofu apply -auto-approve
+  popd
+}
+
+function setup_macos() {
+  pushd opentofu
+  tofu init
+  tofu apply -auto-approve
+  popd
+}
+
+function strip() {
+  echo "$1" | tr -d '"'
+}
+
+for arg in "$@"
+do
+    case $arg in
+        all)
+        do_all
+        shift
+        ;;
+        login)
+        do_login
+        shift
+        ;;
+        refresh)
+        do_refresh
+        shift
+        ;;
+        repush)
+        do_repush
+        shift
+        ;;
+        cleanup)
+        cleanup
+        shift
+        ;;
+        *)
+        echo "cmd not found: try 'all', 'login', or 'cleanup'"
+        shift
+        ;;
+    esac
+done

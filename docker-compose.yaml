@@ -1,0 +1,59 @@
+services:
+
+  helper:
+    image: ubuntu:26.04
+    container_name: helper
+    # restart: "no"
+    depends_on:
+      - vault
+    networks:
+      - vault_backend
+    entrypoint: [ "/sensitive/helper-vault-terraform.sh" ]
+    volumes:
+      - type: bind
+        source: ./terraform
+        target: /terraform
+      - type: bind
+        source: ./sensitive/vault
+        target: /sensitive
+    healthcheck:
+      test: "exit 0"
+  vault:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      x-bake:
+        platforms:
+          - linux/amd64
+          - linux/arm64
+    ports:
+      - "8200:8200"
+    container_name: vault
+    # restart: "no"
+    networks:
+      - vault_backend
+    # entrypoint: [ "/sensitive/helper-vault-terraform.sh" ]
+    entrypoint: [ "sh", "-c", "vault server -config /sensitive/vault/vault.hcl -log-level=trace" ]
+    volumes:
+      - type: bind
+        source: ./terraform
+        target: /terraform
+      - type: bind
+        source: ./sensitive/vault/vault.hcl
+        target: /sensitive/vault/vault.hcl
+    healthcheck:
+      test: "exit 0"
+
+  graphql:
+    image: markchristopherwest/graphql-server-go:latest
+    expose:
+      - 8080
+    container_name: graphql
+    entrypoint: [ "/graphql-server" ]
+    networks:
+      - vault_backend
+    depends_on:
+      - vault
+networks:
+  vault_backend:
+    driver: bridge

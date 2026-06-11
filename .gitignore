@@ -1,0 +1,47 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+# Local .terraform directories
+**/.terraform/*
+
+# .tfstate files
+**/*.tfstate
+**/*.tfstate.*
+
+# Plan files
+**/*.tfplan
+
+# Lock files
+**/.terraform.lock.*
+
+# Crash log files
+**/crash.log
+
+# SSH/TLS keys
+**/*.pem
+**/id_rsa*
+**/id_dsa*
+**/id_ecdsa*
+**/id_ed25519*
+
+# Remove any built plugins
+sensitive/vault/*.txt
+plugins/vault/graphql
+
+!.vscode/launch.json
+
+.DS_STORE
+**/.DS_Store
